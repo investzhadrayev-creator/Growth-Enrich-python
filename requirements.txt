@@ -1,5 +1,0 @@
-flask==3.0.3
-gunicorn==22.0.0
-yfinance==0.2.63
-curl_cffi==0.7.4
-pandas==2.2.3
