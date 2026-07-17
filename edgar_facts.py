@@ -247,8 +247,15 @@ def _detect_confirmed_splits(facts, tags, taxonomy="us-gaap", cik=None):
     MATERIALLY DIFFERENT values across different accessions -- i.e. a later filing retroactively
     restated an earlier year's share count. This only happens for genuine stock splits (never for
     organic dilution, which is never restated). Returns [{end, factor, earliest_val, earliest_filed,
-    latest_val, latest_filed}] -- positive, SEC-sourced confirmation, not a heuristic guess."""
-    by_end = {}
+    latest_val, latest_filed, tag}] -- positive, SEC-sourced confirmation, not a heuristic guess.
+
+    PER-TAG, deliberately (v4.2.3). A restatement is within-tag evidence: the same tag, the same
+    period, two values. Until v4.2.3 all tags pooled into one bucket per end-date, so for a company
+    reporting BOTH basic and diluted weighted averages (live NFLX does; every fixture used one tag)
+    lo = basic pre-split and hi = diluted post-split, and the ratio absorbed the basic/diluted
+    dilution wedge: a clean 10.00x read as ~10.17x, missing the 1% tolerance. The split stayed
+    unconfirmed on live data while the suite was green -- deterministically, on every run."""
+    confirmed_by_end = {}
     for tag in tags:
         units = _concept(facts, taxonomy, tag)
         # companyfacts alone is not sufficient -- see _merge_units. Ask companyconcept for the
@@ -263,6 +270,7 @@ def _detect_confirmed_splits(facts, tags, taxonomy="us-gaap", cik=None):
         key = _pick_unit(units)
         if not key:
             continue
+        by_end = {}  # THIS tag only -- never pool values across tags (see docstring)
         for f in units[key]:
             if not f.get("form", "").startswith("10-K"):
                 continue
@@ -272,27 +280,28 @@ def _detect_confirmed_splits(facts, tags, taxonomy="us-gaap", cik=None):
             if start is not None and _days(start, end) < 300:
                 continue
             by_end.setdefault(end, []).append({"val": val, "filed": filed, "accn": f.get("accn")})
-    confirmed = []
-    for end, rows in by_end.items():
-        distinct_vals = sorted(set(r["val"] for r in rows if r["val"]))
-        if len(distinct_vals) < 2:
-            continue
-        lo, hi = distinct_vals[0], distinct_vals[-1]
-        if lo <= 0:
-            continue
-        ratio = hi / lo
-        factor = next((c for c in _CLEAN_SPLIT_FACTORS if abs(ratio - c) / c <= 0.01), None)
-        if not factor:
-            continue
-        earliest = min(rows, key=lambda r: (r["filed"], r["val"] == lo))
-        earliest = min([r for r in rows if r["val"] == lo], key=lambda r: r["filed"])
-        latest = max([r for r in rows if r["val"] == hi], key=lambda r: r["filed"])
-        # require the restatement to be genuinely LATER (positive confirmation, not filing-order noise)
-        if latest["filed"] > earliest["filed"]:
-            confirmed.append({"end": end, "factor": factor,
-                              "earliest_val": earliest["val"], "earliest_filed": earliest["filed"],
-                              "latest_val": latest["val"], "latest_filed": latest["filed"]})
-    return sorted(confirmed, key=lambda c: c["end"])
+        for end, rows in by_end.items():
+            if end in confirmed_by_end:
+                continue  # tags are priority-ordered; the first tag to confirm an end wins
+            distinct_vals = sorted(set(r["val"] for r in rows if r["val"]))
+            if len(distinct_vals) < 2:
+                continue
+            lo, hi = distinct_vals[0], distinct_vals[-1]
+            if lo <= 0:
+                continue
+            ratio = hi / lo
+            factor = next((c for c in _CLEAN_SPLIT_FACTORS if abs(ratio - c) / c <= 0.01), None)
+            if not factor:
+                continue
+            earliest = min([r for r in rows if r["val"] == lo], key=lambda r: r["filed"])
+            latest = max([r for r in rows if r["val"] == hi], key=lambda r: r["filed"])
+            # require the restatement to be genuinely LATER (positive confirmation, not filing-order noise)
+            if latest["filed"] > earliest["filed"]:
+                confirmed_by_end[end] = {"end": end, "factor": factor,
+                                         "earliest_val": earliest["val"], "earliest_filed": earliest["filed"],
+                                         "latest_val": latest["val"], "latest_filed": latest["filed"],
+                                         "tag": tag}
+    return sorted(confirmed_by_end.values(), key=lambda c: c["end"])
 
 
 def _latest_instant(facts_or_units, tags=None, taxonomy="us-gaap", any_form=False, units_direct=None):
